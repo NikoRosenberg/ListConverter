@@ -61,6 +61,69 @@ class Mapping<T> {
         return headers;
     }
 
+    public void streamFlattened(T obj, Flattener.CellConsumer consumer) {
+        SchemaNode schema = this.toCompiledSchema();
+        int totalCols = countLeaves(schema);
+        String[] buffer = new String[totalCols];
+        int[] rowIndex = new int[] {0};
+
+        streamRecursive(obj, this, buffer, 0, consumer, rowIndex);
+    }
+
+    private int countLeaves(SchemaNode node) {
+        if (node instanceof LeafNode) return 1;
+        if (node instanceof TableNode t) return t.totalLeafCount;
+        throw new IllegalStateException("Unknown node");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> void streamRecursive(
+            T obj,
+            Mapping<T> mapping,
+            String[] buffer,
+            int offset,
+            Flattener.CellConsumer consumer,
+            int[] rowIndex
+    ) {
+        int col = offset;
+
+        // Felder direkt füllen
+        for (FieldMapping<T> f : mapping.fields) {
+            Object val = f.getter.apply(obj);
+            buffer[col++] = val != null ? val.toString() : "";
+        }
+
+        // Kinder
+        if (mapping.children.isEmpty()) {
+            for (int i = 0; i < buffer.length; i++) {
+                consumer.accept(rowIndex[0], i, buffer[i]);
+            }
+            rowIndex[0]++;
+            return;
+        }
+
+        // Für jedes Child → rekursiv
+        for (ChildMapping<T, ?> child : mapping.children) {
+            Collection<?> children = child.getter.apply(obj);
+            if (children == null || children.isEmpty()) continue;
+
+            SchemaNode subSchema = child.mapping.toCompiledSchema();
+            int childCols = child.mapping.countLeaves(subSchema);
+
+            for (Object c : children) {
+                streamRecursive(c, (Mapping<Object>) child.mapping, buffer, col, consumer, rowIndex);
+            }
+            return; // Achtung: downstream hat alles erledigt!
+        }
+
+        // Wenn keine Kinder aufgerufen wurden (nur primitive + keine Children)
+        for (int i = 0; i < buffer.length; i++) {
+            consumer.accept(rowIndex[0], i, buffer[i]);
+        }
+        rowIndex[0]++;
+    }
+
+
     private void collectHeaders(String prefix, List<String> headers) {
         for (FieldMapping<T> f : fields) {
             headers.add(prefix + f.name);
@@ -70,6 +133,16 @@ class Mapping<T> {
             String childPrefix = prefix + c.name + ".";
             c.mapping.collectHeaders(childPrefix, headers);
         }
+    }
+    public SchemaNode toCompiledSchema() {
+        List<SchemaNode> schemaNodes = new ArrayList<>();
+        for (FieldMapping<T> f : fields) {
+            schemaNodes.add(LeafNode.INSTANCE);
+        }
+        for (ChildMapping<T, ?> c : children) {
+            schemaNodes.add(c.mapping.toCompiledSchema());
+        }
+        return new TableNode(schemaNodes.toArray(new SchemaNode[0]));
     }
 
 
@@ -127,6 +200,8 @@ class Mapping<T> {
     }
 }
 
+
+
 // === MAIN ===
 public class DeclarativeMappingDemo {
     public static void main(String[] args) {
@@ -156,7 +231,8 @@ public class DeclarativeMappingDemo {
         List<Object> result = kundeMapping.transform(k);
 
         System.out.println(kundeMapping.getHeader());
-        System.out.println(result);
+
+
     }
 
 
